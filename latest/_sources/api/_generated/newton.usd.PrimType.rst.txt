@@ -1,8 +1,0 @@
-﻿newton.usd.PrimType
-===================
-
-.. autoclass:: newton.usd.PrimType
-   :members:
-   :undoc-members:
-   :show-inheritance:
-   :member-order: groupwise

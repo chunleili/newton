@@ -1,6 +1,0 @@
-﻿newton.math.quat\_between\_vectors\_robust
-==========================================
-
-.. currentmodule:: newton.math
-
-.. autowarpfunc:: quat_between_vectors_robust

@@ -1,6 +1,0 @@
-﻿newton.utils.remesh\_mesh
-=========================
-
-.. currentmodule:: newton.utils
-
-.. autofunction:: remesh_mesh
