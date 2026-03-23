@@ -963,6 +963,13 @@ class ModelBuilder:
         self.tet_materials: list[tuple[float, float, float]] = []
         """Tetrahedral material rows accumulated for :attr:`Model.tet_materials`."""
 
+        # volumetric muscle (vmuscle) — per-tet fiber properties for VBD Hill-type muscle
+        self.vmuscle_tet_ids = []  # indices into tet arrays for vmuscle tets
+        self.vmuscle_tet_fiber_dirs = []  # vec3, rest config unit fiber direction
+        self.vmuscle_tet_sigma0 = []  # float, peak isometric stress [Pa]
+        self.vmuscle_tet_activations = []  # float, activation level [0,1]
+        self.vmuscle_max_contraction_velocity = 10.0  # V_max [l_opt/s]
+
         # muscles
         self.muscle_start: list[int] = []
         """Muscle waypoint start indices accumulated for :attr:`Model.muscle_start`."""
@@ -9824,6 +9831,31 @@ class ModelBuilder:
             m.tet_poses = _to_wp_array(self.tet_poses, wp.mat33, requires_grad=requires_grad)
             m.tet_activations = _to_wp_array(self.tet_activations, wp.float32, requires_grad=requires_grad)
             m.tet_materials = _to_wp_array(self.tet_materials, wp.float32, requires_grad=requires_grad)
+
+            # ---------------------
+            # volumetric muscle (vmuscle)
+
+            tet_count = len(self.tet_indices)
+            if self.vmuscle_tet_ids:
+                # Build tet_count-length arrays, non-muscle tets get zero fiber + sigma0=0
+                fiber_dirs = [(0.0, 0.0, 0.0)] * tet_count
+                sigma0_arr = [0.0] * tet_count
+                activations_arr = [0.0] * tet_count
+                for idx, tet_id in enumerate(self.vmuscle_tet_ids):
+                    fiber_dirs[tet_id] = self.vmuscle_tet_fiber_dirs[idx]
+                    sigma0_arr[tet_id] = self.vmuscle_tet_sigma0[idx]
+                    activations_arr[tet_id] = self.vmuscle_tet_activations[idx]
+                m.vmuscle_tet_fiber_dirs = wp.array(
+                    fiber_dirs, dtype=wp.vec3, device=device, requires_grad=requires_grad
+                )
+                m.vmuscle_tet_sigma0 = wp.array(sigma0_arr, dtype=wp.float32, device=device)
+                m.vmuscle_tet_activations = wp.array(
+                    activations_arr, dtype=wp.float32, device=device
+                )
+                m.vmuscle_max_contraction_velocity = self.vmuscle_max_contraction_velocity
+                m.vmuscle_count = len(self.vmuscle_tet_ids)
+            else:
+                m.vmuscle_count = 0
 
             # -----------------------
             # muscles

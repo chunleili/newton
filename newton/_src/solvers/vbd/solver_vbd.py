@@ -433,6 +433,16 @@ class SolverVBD(SolverBase):
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
 
+        # vmuscle: allocate prev2 position buffer for F-V lagged velocity
+        if hasattr(self.model, "vmuscle_count") and self.model.vmuscle_count > 0:
+            self.particle_q_prev2 = wp.zeros(
+                self.model.particle_count, dtype=wp.vec3, device=self.device
+            )
+            wp.copy(self.particle_q_prev2, self.model.particle_q)
+            # Also init particle_q_prev to rest positions so the first F-V
+            # computation sees zero velocity instead of garbage.
+            wp.copy(self.particle_q_prev, self.model.particle_q)
+
     def _init_rigid_system(
         self,
         model: Model,
@@ -1371,6 +1381,13 @@ class SolverVBD(SolverBase):
             control = self.model.control(clone_variables=False)
 
         self._initialize_rigid_bodies(state_in, control, contacts, dt, update_rigid_history)
+
+        # vmuscle: shift prev positions (prev2 <- prev) BEFORE forward_step
+        # overwrites particle_q_prev. On first call, prev2 keeps its init from
+        # model.particle_q while prev is still the last step's positions.
+        if hasattr(self, "particle_q_prev2"):
+            wp.copy(self.particle_q_prev2, self.particle_q_prev)
+
         self._initialize_particles(state_in, state_out, dt)
 
         for iter_num in range(self.iterations):
@@ -1820,6 +1837,24 @@ class SolverVBD(SolverBase):
                     device=self.device,
                     max_blocks=self.model.device.sm_count,
                 )
+
+            # vmuscle: accumulate fiber force and hessian
+            if hasattr(self.model, "vmuscle_count") and self.model.vmuscle_count > 0:
+                from .vmuscle_launch import launch_accumulate_fiber_force_and_hessian
+
+                launch_accumulate_fiber_force_and_hessian(
+                    self.model,
+                    dt,
+                    self.model.particle_color_groups[color],
+                    self.particle_q_prev,
+                    self.particle_q_prev2,
+                    state_in.particle_q,
+                    self.particle_adjacency,
+                    self.particle_forces,
+                    self.particle_hessians,
+                    self.device,
+                )
+
             if self.use_particle_tile_solve:
                 wp.launch(
                     kernel=solve_elasticity_tile,
