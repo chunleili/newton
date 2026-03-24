@@ -434,7 +434,13 @@ class SolverVBD(SolverBase):
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
 
         # vmuscle: allocate prev2 position buffer for F-V lagged velocity
-        if hasattr(self.model, "vmuscle_count") and self.model.vmuscle_count > 0:
+        vmuscle_ns = getattr(self.model, "vmuscle", None)
+        self.has_vmuscle = (
+            vmuscle_ns is not None
+            and hasattr(vmuscle_ns, "sigma0")
+            and float(vmuscle_ns.sigma0.numpy().max()) > 0.0
+        )
+        if self.has_vmuscle:
             self.particle_q_prev2 = wp.zeros(
                 self.model.particle_count, dtype=wp.vec3, device=self.device
             )
@@ -442,6 +448,9 @@ class SolverVBD(SolverBase):
             # Also init particle_q_prev to rest positions so the first F-V
             # computation sees zero velocity instead of garbage.
             wp.copy(self.particle_q_prev, self.model.particle_q)
+            # Cache scalar vmuscle parameters (extracted from 1-element arrays)
+            self.vmuscle_max_contraction_velocity = float(vmuscle_ns.max_contraction_velocity.numpy()[0])
+            self.vmuscle_fiber_damping = float(vmuscle_ns.fiber_damping.numpy()[0])
 
     def _init_rigid_system(
         self,
@@ -1038,6 +1047,47 @@ class SolverVBD(SolverBase):
                 namespace="vbd",
             )
         )
+        # Volumetric muscle (vmuscle) properties
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="fiber_dirs",
+                frequency=Model.AttributeFrequency.TETRAHEDRON,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.vec3,
+                default=wp.vec3(0.0, 0.0, 0.0),
+                namespace="vmuscle",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="sigma0",
+                frequency=Model.AttributeFrequency.TETRAHEDRON,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.float32,
+                default=0.0,
+                namespace="vmuscle",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="max_contraction_velocity",
+                frequency=Model.AttributeFrequency.ONCE,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.float32,
+                default=10.0,
+                namespace="vmuscle",
+            )
+        )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="fiber_damping",
+                frequency=Model.AttributeFrequency.ONCE,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.float32,
+                default=0.0,
+                namespace="vmuscle",
+            )
+        )
 
     # =====================================================
     # Adjacency Building Methods
@@ -1392,7 +1442,7 @@ class SolverVBD(SolverBase):
 
         for iter_num in range(self.iterations):
             self._solve_rigid_body_iteration(state_in, state_out, control, contacts, dt)
-            self._solve_particle_iteration(state_in, state_out, contacts, dt, iter_num)
+            self._solve_particle_iteration(state_in, state_out, control, contacts, dt, iter_num)
 
         self._finalize_rigid_bodies(state_out, dt)
         self._finalize_particles(state_out, dt)
@@ -1719,7 +1769,7 @@ class SolverVBD(SolverBase):
             )
 
     def _solve_particle_iteration(
-        self, state_in: State, state_out: State, contacts: Contacts | None, dt: float, iter_num: int
+        self, state_in: State, state_out: State, control: Control, contacts: Contacts | None, dt: float, iter_num: int
     ):
         """Solve one VBD iteration for particles."""
         model = self.model
@@ -1839,11 +1889,14 @@ class SolverVBD(SolverBase):
                 )
 
             # vmuscle: accumulate fiber force and hessian
-            if hasattr(self.model, "vmuscle_count") and self.model.vmuscle_count > 0:
+            if self.has_vmuscle:
                 from .vmuscle_launch import launch_accumulate_fiber_force_and_hessian
 
                 launch_accumulate_fiber_force_and_hessian(
                     self.model,
+                    control.tet_activations,
+                    self.vmuscle_max_contraction_velocity,
+                    self.vmuscle_fiber_damping,
                     dt,
                     self.model.particle_color_groups[color],
                     self.particle_q_prev,

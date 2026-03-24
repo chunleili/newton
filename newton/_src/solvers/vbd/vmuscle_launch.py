@@ -7,6 +7,9 @@ from .vmuscle_kernels import accumulate_fiber_force_and_hessian
 
 def launch_accumulate_fiber_force_and_hessian(
     model,
+    tet_activations,
+    max_contraction_velocity,
+    fiber_damping,
     dt,
     color_group,
     particle_q_prev,
@@ -17,14 +20,22 @@ def launch_accumulate_fiber_force_and_hessian(
     particle_hessians,
     device,
 ):
-    """Accumulate fiber force and Hessian for one color group."""
-    fiber_damping = getattr(model, 'vmuscle_fiber_damping', 0.0)
+    """Accumulate fiber force and Hessian for one color group.
+
+    Args:
+        model: Newton Model with vmuscle properties.
+        tet_activations: Per-tet activation array from Control.tet_activations.
+        max_contraction_velocity: V_max scalar [l_opt/s].
+        fiber_damping: Fiber viscous damping coefficient.
+        dt: Time step size.
+    """
+    vmuscle = model.vmuscle
     wp.launch(
         kernel=accumulate_fiber_force_and_hessian,
         dim=color_group.size,
         inputs=[
             dt,
-            model.vmuscle_max_contraction_velocity,
+            max_contraction_velocity,
             fiber_damping,
             color_group,
             particle_q_prev,
@@ -32,9 +43,9 @@ def launch_accumulate_fiber_force_and_hessian(
             pos,
             model.tet_indices,
             model.tet_poses,
-            model.vmuscle_tet_fiber_dirs,
-            model.vmuscle_tet_sigma0,
-            model.vmuscle_tet_activations,
+            vmuscle.fiber_dirs,
+            vmuscle.sigma0,
+            tet_activations,
             particle_adjacency,
         ],
         outputs=[particle_forces, particle_hessians],
