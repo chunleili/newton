@@ -969,6 +969,7 @@ class ModelBuilder:
         self.vmuscle_tet_sigma0 = []  # float, peak isometric stress [Pa]
         self.vmuscle_tet_activations = []  # float, activation level [0,1]
         self.vmuscle_max_contraction_velocity = 10.0  # V_max [l_opt/s]
+        self.vmuscle_fiber_damping = 0.0  # fiber viscous damping coefficient
 
         # muscles
         self.muscle_start: list[int] = []
@@ -9853,6 +9854,7 @@ class ModelBuilder:
                     activations_arr, dtype=wp.float32, device=device
                 )
                 m.vmuscle_max_contraction_velocity = self.vmuscle_max_contraction_velocity
+                m.vmuscle_fiber_damping = self.vmuscle_fiber_damping
                 m.vmuscle_count = len(self.vmuscle_tet_ids)
             else:
                 m.vmuscle_count = 0

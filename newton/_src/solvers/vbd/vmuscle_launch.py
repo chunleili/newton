@@ -18,12 +18,14 @@ def launch_accumulate_fiber_force_and_hessian(
     device,
 ):
     """Accumulate fiber force and Hessian for one color group."""
+    fiber_damping = getattr(model, 'vmuscle_fiber_damping', 0.0)
     wp.launch(
         kernel=accumulate_fiber_force_and_hessian,
         dim=color_group.size,
         inputs=[
             dt,
             model.vmuscle_max_contraction_velocity,
+            fiber_damping,
             color_group,
             particle_q_prev,
             particle_q_prev2,

@@ -217,19 +217,27 @@ def evaluate_fiber_force_and_hessian(
     tet_id: int,
     v_order: int,
     pos: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),
     tet_indices: wp.array(dtype=wp.int32, ndim=2),
     Dm_inv: wp.mat33,
     fiber_dir: wp.vec3,
     sigma0: float,
     activation: float,
     fv_factor: float,
+    fiber_damping: float,
+    dt: float,
 ) -> tuple[wp.vec3, wp.mat33]:
     """Compute per-vertex (vec3 force, mat33 hessian) for one adjacent tet."""
+    i0 = tet_indices[tet_id, 0]
+    i1 = tet_indices[tet_id, 1]
+    i2 = tet_indices[tet_id, 2]
+    i3 = tet_indices[tet_id, 3]
+
     # Get vertices
-    v0 = pos[tet_indices[tet_id, 0]]
-    v1 = pos[tet_indices[tet_id, 1]]
-    v2 = pos[tet_indices[tet_id, 2]]
-    v3 = pos[tet_indices[tet_id, 3]]
+    v0 = pos[i0]
+    v1 = pos[i1]
+    v2 = pos[i2]
+    v3 = pos[i3]
 
     # Compute rest volume from Dm_inv
     rest_volume = 1.0 / (wp.determinant(Dm_inv) * 6.0)
@@ -260,6 +268,30 @@ def evaluate_fiber_force_and_hessian(
     force, hessian = assemble_tet_vertex_force_and_hessian(
         P_vec, H, m[0], m[1], m[2]
     )
+
+    # Fiber damping: viscous force along fiber direction proportional to stretch rate.
+    # Derivation: let Fd0 = F * d0, l = |Fd0|. Then d(Fd0)/dx = dot(m, d0) * I
+    # (since m encodes the barycentric weight for this vertex in Dm_inv),
+    # so dl/dx = dot(m, d0) * normalize(Fd0).
+    if fiber_damping > 0.0:
+        Fd0 = F * fiber_dir
+        l_cur = wp.sqrt(wp.max(wp.dot(Fd0, Fd0), 1.0e-8))
+
+        Ds_prev = wp.matrix_from_cols(
+            pos_prev[i1] - pos_prev[i0],
+            pos_prev[i2] - pos_prev[i0],
+            pos_prev[i3] - pos_prev[i0],
+        )
+        l_prev = wp.sqrt(wp.max(wp.dot((Ds_prev * Dm_inv) * fiber_dir,
+                                       (Ds_prev * Dm_inv) * fiber_dir), 1.0e-8))
+
+        dl_dt = (l_cur - l_prev) / dt
+        dldx = wp.dot(m, fiber_dir) * (Fd0 / l_cur)
+
+        kd = fiber_damping * sigma0 * rest_volume
+        force = force + (-kd * dl_dt) * dldx
+        hessian = hessian + (kd / dt) * wp.outer(dldx, dldx)
+
     return force, hessian
 
 
@@ -314,6 +346,7 @@ def compute_fv_factor_inline(
 def accumulate_fiber_force_and_hessian(
     dt: float,
     v_max: float,
+    fiber_damping: float,
     particle_ids_in_color: wp.array(dtype=wp.int32),
     particle_q_prev: wp.array(dtype=wp.vec3),
     particle_q_prev2: wp.array(dtype=wp.vec3),
@@ -356,8 +389,9 @@ def accumulate_fiber_force_and_hessian(
             )
 
             f_fiber, h_fiber = evaluate_fiber_force_and_hessian(
-                tet_id, v_order, pos, tet_indices, Dm_inv,
+                tet_id, v_order, pos, particle_q_prev, tet_indices, Dm_inv,
                 fiber_dir, sigma0, activation, fv_factor,
+                fiber_damping, dt,
             )
             f = f + f_fiber
             h = h + h_fiber
