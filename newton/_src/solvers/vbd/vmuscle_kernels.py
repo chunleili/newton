@@ -96,17 +96,6 @@ def dgf_passive_force_deriv(lm_tilde: float) -> float:
     return (kPE / e0) * wp.exp(kPE * (lm_tilde - 1.0) / e0) / denom
 
 
-@wp.func
-def dgf_force_velocity(v_norm: float) -> float:
-    """DGF 2016 force-velocity curve (sinh^-1 form)."""
-    d1 = -0.3211346127989808
-    d2 = -8.149
-    d3 = -0.374
-    d4 = 0.8825327733249912
-    x = d2 * v_norm + d3
-    return d1 * wp.log(x + wp.sqrt(x * x + 1.0)) + d4
-
-
 # =============================================================================
 # Energy Derivatives
 # =============================================================================
@@ -114,9 +103,9 @@ def dgf_force_velocity(v_norm: float) -> float:
 
 @wp.func
 def fiber_energy_derivatives(
-    I5: float, activation: float, sigma0: float, fv_factor: float
+    I5: float, activation: float, sigma0: float
 ) -> wp.vec2:
-    """Compute Psi'(I5) and Psi''(I5) for Hill-type fiber energy.
+    """Compute Psi'(I5) and Psi''(I5) for quasi-static Hill-type fiber energy.
 
     Returns:
         vec2: (dPsi_dI5, d2Psi_dI5_2)
@@ -128,13 +117,13 @@ def fiber_energy_derivatives(
     dfL = dgf_active_force_length_deriv(lam)
     dfPE = dgf_passive_force_deriv(lam)
 
-    # Psi'(I5) = sigma0/(2*lam) * [a*f_L*f_V + f_PE]
-    total_force = activation * fL * fv_factor + fPE
+    # Psi'(I5) = sigma0/(2*lam) * [a*f_L + f_PE]
+    total_force = activation * fL + fPE
     dPsi = sigma0 / (2.0 * lam) * total_force
     dPsi = wp.max(dPsi, 0.0)  # clamp to ensure PSD Hessian
 
-    # Psi''(I5) = sigma0/(4*lam^3) * [a*f_V*(f_L'*lam - f_L) + (f_PE'*lam - f_PE)]
-    d2_term = activation * fv_factor * (dfL * lam - fL) + (dfPE * lam - fPE)
+    # Psi''(I5) = sigma0/(4*lam^3) * [a*(f_L'*lam - f_L) + (f_PE'*lam - f_PE)]
+    d2_term = activation * (dfL * lam - fL) + (dfPE * lam - fPE)
     d2Psi = sigma0 / (4.0 * lam * lam * lam) * d2_term
     # Clamp d2Psi >= 0 to ensure PSD Hessian (SPD projection).
     # Negative d2Psi from active force derivative can make Hessian indefinite.
@@ -155,7 +144,6 @@ def evaluate_fiber_pk1_and_hessian(
     activation: float,
     sigma0: float,
     rest_volume: float,
-    fv_factor: float,
 ) -> tuple[vec9, mat99]:
     """Compute fiber PK1 stress (vec9) and 9x9 Hessian, scaled by rest_volume.
 
@@ -169,7 +157,7 @@ def evaluate_fiber_pk1_and_hessian(
     Fd0 = F * d0
     I5 = wp.dot(Fd0, Fd0)
 
-    derivs = fiber_energy_derivatives(I5, activation, sigma0, fv_factor)
+    derivs = fiber_energy_derivatives(I5, activation, sigma0)
     dPsi = derivs[0]
     d2Psi = derivs[1]
 
@@ -223,7 +211,6 @@ def evaluate_fiber_force_and_hessian(
     fiber_dir: wp.vec3,
     sigma0: float,
     activation: float,
-    fv_factor: float,
     fiber_damping: float,
     dt: float,
 ) -> tuple[wp.vec3, wp.mat33]:
@@ -248,7 +235,7 @@ def evaluate_fiber_force_and_hessian(
 
     # Fiber PK1 and Hessian
     P_vec, H = evaluate_fiber_pk1_and_hessian(
-        F, fiber_dir, activation, sigma0, rest_volume, fv_factor
+        F, fiber_dir, activation, sigma0, rest_volume
     )
 
     # Extract barycentric weight for this vertex (same pattern as Neo-Hookean)
@@ -294,49 +281,6 @@ def evaluate_fiber_force_and_hessian(
 
     return force, hessian
 
-
-# =============================================================================
-# Inline F-V Factor Computation
-# =============================================================================
-
-
-@wp.func
-def compute_fv_factor_inline(
-    tet_id: int,
-    tet_indices: wp.array(dtype=wp.int32, ndim=2),
-    Dm_inv: wp.mat33,
-    fiber_dir: wp.vec3,
-    q_prev: wp.array(dtype=wp.vec3),
-    q_prev2: wp.array(dtype=wp.vec3),
-    dt: float,
-    v_max: float,
-) -> float:
-    """Compute f_V factor from two consecutive timestep positions (inline)."""
-    i0 = tet_indices[tet_id, 0]
-    i1 = tet_indices[tet_id, 1]
-    i2 = tet_indices[tet_id, 2]
-    i3 = tet_indices[tet_id, 3]
-
-    # l_tilde_current from prev positions x(n-1)
-    Ds1 = wp.matrix_from_cols(
-        q_prev[i1] - q_prev[i0], q_prev[i2] - q_prev[i0], q_prev[i3] - q_prev[i0]
-    )
-    Fd1 = (Ds1 * Dm_inv) * fiber_dir
-    l_current = wp.sqrt(wp.max(wp.dot(Fd1, Fd1), 1.0e-8))
-
-    # l_tilde_prev from prev2 positions x(n-2)
-    Ds2 = wp.matrix_from_cols(
-        q_prev2[i1] - q_prev2[i0],
-        q_prev2[i2] - q_prev2[i0],
-        q_prev2[i3] - q_prev2[i0],
-    )
-    Fd2 = (Ds2 * Dm_inv) * fiber_dir
-    l_prev = wp.sqrt(wp.max(wp.dot(Fd2, Fd2), 1.0e-8))
-
-    v_norm = wp.clamp((l_current - l_prev) / (dt * v_max), -1.0, 1.0)
-    return dgf_force_velocity(v_norm)
-
-
 # =============================================================================
 # Main Accumulation Kernel
 # =============================================================================
@@ -345,11 +289,9 @@ def compute_fv_factor_inline(
 @wp.kernel
 def accumulate_fiber_force_and_hessian(
     dt: float,
-    v_max: float,
     fiber_damping: float,
     particle_ids_in_color: wp.array(dtype=wp.int32),
     particle_q_prev: wp.array(dtype=wp.vec3),
-    particle_q_prev2: wp.array(dtype=wp.vec3),
     pos: wp.array(dtype=wp.vec3),
     tet_indices: wp.array(dtype=wp.int32, ndim=2),
     tet_poses: wp.array(dtype=wp.mat33),
@@ -361,11 +303,7 @@ def accumulate_fiber_force_and_hessian(
     particle_forces: wp.array(dtype=wp.vec3),
     particle_hessians: wp.array(dtype=wp.mat33),
 ):
-    """Accumulate Hill-type fiber force and Hessian for each particle in color group.
-
-    F-V factor is computed inline from particle_q_prev and particle_q_prev2,
-    no precomputation needed.
-    """
+    """Accumulate quasi-static Hill-type fiber force and Hessian for each particle."""
     tid = wp.tid()
     particle_index = particle_ids_in_color[tid]
     f = wp.vec3(0.0, 0.0, 0.0)
@@ -382,15 +320,9 @@ def accumulate_fiber_force_and_hessian(
             Dm_inv = tet_poses[tet_id]
             activation = vmuscle_tet_activations[tet_id]
 
-            # Inline F-V: compute from prev and prev2 positions
-            fv_factor = compute_fv_factor_inline(
-                tet_id, tet_indices, Dm_inv, fiber_dir,
-                particle_q_prev, particle_q_prev2, dt, v_max,
-            )
-
             f_fiber, h_fiber = evaluate_fiber_force_and_hessian(
                 tet_id, v_order, pos, particle_q_prev, tet_indices, Dm_inv,
-                fiber_dir, sigma0, activation, fv_factor,
+                fiber_dir, sigma0, activation,
                 fiber_damping, dt,
             )
             f = f + f_fiber

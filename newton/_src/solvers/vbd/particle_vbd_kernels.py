@@ -1804,6 +1804,39 @@ def forward_step(
 
 
 @wp.kernel
+def forward_step_quasi_static(
+    dt: float,
+    gravity: wp.array(dtype=wp.vec3),
+    pos_prev: wp.array(dtype=wp.vec3),
+    pos: wp.array(dtype=wp.vec3),
+    inv_mass: wp.array(dtype=float),
+    external_force: wp.array(dtype=wp.vec3),
+    particle_flags: wp.array(dtype=wp.int32),
+    inertia_out: wp.array(dtype=wp.vec3),
+    displacements_out: wp.array(dtype=wp.vec3),
+):
+    """Forward step without velocity history, keeping only body forces.
+
+    This is used by vmuscle quasi-static mode. It preserves gravity and
+    external forces in the inertial target, but ignores the incoming
+    velocity state to avoid dynamic overshoot from lagged particle history.
+    """
+    particle = wp.tid()
+
+    pos_prev[particle] = pos[particle]
+    if not particle_flags[particle] & ParticleFlags.ACTIVE or inv_mass[particle] == 0:
+        inertia_out[particle] = pos_prev[particle]
+        if displacements_out:
+            displacements_out[particle] = wp.vec3(0.0, 0.0, 0.0)
+        return
+
+    displacement = (gravity[0] + external_force[particle] * inv_mass[particle]) * (dt * dt)
+    inertia_out[particle] = pos[particle] + displacement
+    if displacements_out:
+        displacements_out[particle] = displacement
+
+
+@wp.kernel
 def compute_particle_conservative_bound(
     # inputs
     conservative_bound_relaxation: float,

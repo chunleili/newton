@@ -44,6 +44,7 @@ from .particle_vbd_kernels import (
     build_vertex_n_ring_tris_collision_filter,
     # Solver kernels (particle VBD)
     forward_step,
+    forward_step_quasi_static,
     set_to_csr,
     solve_elasticity,
     solve_elasticity_tile,
@@ -163,6 +164,7 @@ class SolverVBD(SolverBase):
         iterations: int = 10,
         friction_epsilon: float = 1e-2,
         integrate_with_external_rigid_solver: bool = False,
+        vmuscle_quasi_static: bool = True,
         # Particle parameters
         particle_enable_self_contact: bool = False,
         particle_self_contact_radius: float = 0.2,
@@ -201,6 +203,10 @@ class SolverVBD(SolverBase):
             iterations: Number of VBD iterations per step.
             friction_epsilon: Threshold to smooth small relative velocities in friction computation (used for both particle
                 and rigid body contacts).
+            vmuscle_quasi_static: When ``True``, vmuscle particle initialization ignores
+                incoming velocity history and uses a quasi-static inertial target that only
+                retains gravity/external forces. This is enabled by default because vmuscle
+                examples are currently more stable in this mode.
 
             Particle parameters:
 
@@ -279,6 +285,7 @@ class SolverVBD(SolverBase):
         # Common parameters
         self.iterations = iterations
         self.friction_epsilon = friction_epsilon
+        self.vmuscle_quasi_static = vmuscle_quasi_static
 
         # Rigid integration mode: when True, rigid bodies are integrated by an external
         # solver (one-way coupling). SolverVBD will not move rigid bodies, but can still
@@ -433,7 +440,6 @@ class SolverVBD(SolverBase):
         self.particle_displacements = wp.zeros(self.model.particle_count, dtype=wp.vec3, device=self.device)
         self.truncation_ts = wp.zeros(self.model.particle_count, dtype=float, device=self.device)
 
-        # vmuscle: allocate prev2 position buffer for F-V lagged velocity
         vmuscle_ns = getattr(self.model, "vmuscle", None)
         self.has_vmuscle = (
             vmuscle_ns is not None
@@ -441,15 +447,9 @@ class SolverVBD(SolverBase):
             and float(vmuscle_ns.sigma0.numpy().max()) > 0.0
         )
         if self.has_vmuscle:
-            self.particle_q_prev2 = wp.zeros(
-                self.model.particle_count, dtype=wp.vec3, device=self.device
-            )
-            wp.copy(self.particle_q_prev2, self.model.particle_q)
-            # Also init particle_q_prev to rest positions so the first F-V
-            # computation sees zero velocity instead of garbage.
+            # Initialize q_prev to rest positions so the first damping evaluation
+            # sees zero stretch rate instead of garbage history.
             wp.copy(self.particle_q_prev, self.model.particle_q)
-            # Cache scalar vmuscle parameters (extracted from 1-element arrays)
-            self.vmuscle_max_contraction_velocity = float(vmuscle_ns.max_contraction_velocity.numpy()[0])
             self.vmuscle_fiber_damping = float(vmuscle_ns.fiber_damping.numpy()[0])
 
     def _init_rigid_system(
@@ -1070,16 +1070,6 @@ class SolverVBD(SolverBase):
         )
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
-                name="max_contraction_velocity",
-                frequency=Model.AttributeFrequency.ONCE,
-                assignment=Model.AttributeAssignment.MODEL,
-                dtype=wp.float32,
-                default=10.0,
-                namespace="vmuscle",
-            )
-        )
-        builder.add_custom_attribute(
-            ModelBuilder.CustomAttribute(
                 name="fiber_damping",
                 frequency=Model.AttributeFrequency.ONCE,
                 assignment=Model.AttributeAssignment.MODEL,
@@ -1432,12 +1422,6 @@ class SolverVBD(SolverBase):
 
         self._initialize_rigid_bodies(state_in, control, contacts, dt, update_rigid_history)
 
-        # vmuscle: shift prev positions (prev2 <- prev) BEFORE forward_step
-        # overwrites particle_q_prev. On first call, prev2 keeps its init from
-        # model.particle_q while prev is still the last step's positions.
-        if hasattr(self, "particle_q_prev2"):
-            wp.copy(self.particle_q_prev2, self.particle_q_prev)
-
         self._initialize_particles(state_in, state_out, dt)
 
         for iter_num in range(self.iterations):
@@ -1526,25 +1510,45 @@ class SolverVBD(SolverBase):
 
         model = self.model
 
-        wp.launch(
-            kernel=forward_step,
-            inputs=[
-                dt,
-                model.gravity,
-                self.particle_q_prev,
-                state_in.particle_q,
-                state_in.particle_qd,
-                self.model.particle_inv_mass,
-                state_in.particle_f,
-                self.model.particle_flags,
-            ],
-            outputs=[
-                self.inertia,
-                self.particle_displacements,
-            ],
-            dim=self.model.particle_count,
-            device=self.device,
-        )
+        if self.has_vmuscle and self.vmuscle_quasi_static:
+            wp.launch(
+                kernel=forward_step_quasi_static,
+                inputs=[
+                    dt,
+                    model.gravity,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    self.model.particle_inv_mass,
+                    state_in.particle_f,
+                    self.model.particle_flags,
+                ],
+                outputs=[
+                    self.inertia,
+                    self.particle_displacements,
+                ],
+                dim=self.model.particle_count,
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                kernel=forward_step,
+                inputs=[
+                    dt,
+                    model.gravity,
+                    self.particle_q_prev,
+                    state_in.particle_q,
+                    state_in.particle_qd,
+                    self.model.particle_inv_mass,
+                    state_in.particle_f,
+                    self.model.particle_flags,
+                ],
+                outputs=[
+                    self.inertia,
+                    self.particle_displacements,
+                ],
+                dim=self.model.particle_count,
+                device=self.device,
+            )
 
         self._penetration_free_truncation(state_in.particle_q)
 
@@ -1895,12 +1899,10 @@ class SolverVBD(SolverBase):
                 launch_accumulate_fiber_force_and_hessian(
                     self.model,
                     control.tet_activations,
-                    self.vmuscle_max_contraction_velocity,
                     self.vmuscle_fiber_damping,
                     dt,
                     self.model.particle_color_groups[color],
                     self.particle_q_prev,
-                    self.particle_q_prev2,
                     state_in.particle_q,
                     self.particle_adjacency,
                     self.particle_forces,
