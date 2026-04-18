@@ -381,7 +381,7 @@ class SolverFeatherstone(SolverBase):
             eval_particle_body_contact_forces(model, state_in, contacts, particle_f, body_f, body_f_in_world_frame=True)
 
             # muscles
-            if False:
+            if self.model.muscle_count:
                 eval_muscle_forces(model, state_in, control, body_f)
 
             # ----------------------------
