@@ -47,7 +47,7 @@ def eval_muscle(
     body_v_s: wp.array(dtype=wp.spatial_vector),
     body_com: wp.array(dtype=wp.vec3),
     muscle_start: wp.array(dtype=int),
-    muscle_params: wp.array(dtype=float),
+    muscle_params: wp.array(dtype=float, ndim=2),
     muscle_links: wp.array(dtype=int),
     muscle_points: wp.array(dtype=wp.vec3),
     muscle_activation: wp.array(dtype=float),
